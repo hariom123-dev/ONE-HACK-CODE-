@@ -1,3 +1,7 @@
 node_modules/
 .env
 dist/
+
+ai-agent/.env
+smart-contracts/node_modules/
+smart-contracts/hardhat.log
