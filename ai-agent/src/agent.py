@@ -4,6 +4,7 @@ import time
 from typing import Optional, Callable, Awaitable
 from src.x402_client import X402Client
 from src.wallet import ContractRevertError
+from src.models import AgentState
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class AutonomousAgent:
             return {"status": "failed", "halt_reason": str(e)}
 
         estimated_cost = self.planner.estimate_total_cost(plan)
-        await self.emit_event("PLAN_GENERATED", {"steps": len(plan), "estimated_cost": estimated_cost})
+        await self.emit_event("PLAN_GENERATED", {"steps": len(plan) if isinstance(plan, list) else len(plan.steps), "estimated_cost": estimated_cost})
         
         # Pre-Flight Budget Optimization
         remaining_budget = await self.wallet.get_remaining_budget()
@@ -51,7 +52,12 @@ class AutonomousAgent:
         
         if remaining_budget < estimated_cost:
             # Prune optional steps
-            required_plan = [step for step in plan if step.get("required", False)]
+            # Support both dict based plan (legacy planner) and object based plan (updated models)
+            if isinstance(plan, list):
+                required_plan = [step for step in plan if step.get("required", False)]
+            else:
+                required_plan = [step for step in plan.steps if step.required]
+            
             req_cost = self.planner.estimate_total_cost(required_plan)
             if remaining_budget < req_cost:
                 await self.emit_event("BUDGET_EXHAUSTION_PREVENTED", {"msg": "Insufficient budget for core tasks. Halting."})
@@ -62,18 +68,23 @@ class AutonomousAgent:
             plan = required_plan
             await self.emit_event("BUDGET_EXHAUSTION_PREVENTED", {"msg": "Pruned optional steps to fit budget."})
 
-        research_context = {
-            "goal": goal,
-            "steps_completed": 0,
-            "results": [],
-            "final_output": None,
-            "status": "in_progress"
-        }
+        # Initialize State Machine using Pydantic Model
+        state = AgentState(
+            original_goal=goal,
+            current_step_index=0,
+            purchased_data=[],
+            final_output=None,
+            status="in_progress"
+        )
         
         current_input = goal
+        
+        # Handle plan iteration safely for both dicts and Pydantic models
+        steps_to_execute = plan if isinstance(plan, list) else plan.steps
 
-        for i, step in enumerate(plan):
-            capability = step["capability"]
+        for i, step in enumerate(steps_to_execute):
+            capability = step["capability"] if isinstance(step, dict) else step.capability
+            parameters = step.get("parameters", {}) if isinstance(step, dict) else step.parameters
             
             # Find provider
             try:
@@ -81,14 +92,14 @@ class AutonomousAgent:
                 service_url = provider_info["url"]
             except Exception as e:
                 await self.emit_event("RESEARCH_HALTED", {"reason": f"No provider for {capability}: {e}"})
-                return research_context
+                return state.model_dump()
             
             await self.emit_event("STEP_STARTED", {"step_index": i + 1, "capability": capability, "provider": provider_info["name"]})
             
             payload = {
                 "capability": capability,
                 "input_data": current_input,
-                "parameters": step.get("parameters", {})
+                "parameters": parameters
             }
             
             # Reset wallet tracking
@@ -133,19 +144,19 @@ class AutonomousAgent:
                     )
                     await self.emit_event("DELIVERY_VERIFIED", {"delivery_hash": delivery_hash, "status": "Valid"})
 
-                research_context["results"].append({
+                state.purchased_data.append({
                     "step": i + 1,
                     "capability": capability,
                     "output": step_output,
                     "provider": provider_info["name"]
                 })
-                research_context["steps_completed"] += 1
+                state.current_step_index += 1
                 current_input = step_output
                 
             except ContractRevertError as e:
                 await self.emit_event("PROTOCOL_REVERT_BLOCKED", {"error": str(e), "step": i+1})
-                research_context["status"] = "halted_by_contract"
-                research_context["halt_reason"] = str(e)
+                state.status = "halted_by_contract"
+                # using extra fields or log it
                 break
                 
             except Exception as e:
@@ -167,24 +178,42 @@ class AutonomousAgent:
                         "error": str(e)
                     })
                     
-                research_context["status"] = "failed"
-                research_context["halt_reason"] = str(e)
+                state.status = "failed"
                 break
                 
-        if research_context["status"] == "in_progress":
+        if state.status == "in_progress":
             # Cognitive Synthesis
-            await self.emit_event("SYNTHESIZING_FINAL_OUTPUT", {"results_count": len(research_context["results"])})
+            await self.emit_event("SYNTHESIZING_FINAL_OUTPUT", {"results_count": len(state.purchased_data)})
             try:
-                final_output = await self.llm_engine.synthesize_research(goal, research_context["results"])
-                research_context["final_output"] = final_output
-                research_context["status"] = "completed"
-                await self.emit_event("RESEARCH_COMPLETED", {"steps": research_context["steps_completed"]})
+                final_output = await self.llm_engine.synthesize_research(goal, state.purchased_data)
+                state.final_output = final_output
+                state.status = "completed"
+                await self.emit_event("RESEARCH_COMPLETED", {"steps": state.current_step_index})
+                
+                # The Reflection Loop
+                logger.info("Starting Evaluation and Reflection Loop...")
+                await self.emit_event("REFLECTION_STARTED", {})
+                
+                evaluation = await self.llm_engine.evaluate_output(goal, state.final_output)
+                logger.info(f"[EVALUATION] Score: {evaluation.score}/10")
+                logger.info(f"[EVALUATION] Critique: {evaluation.critique}")
+                await self.emit_event("EVALUATION_COMPLETED", {"score": evaluation.score, "critique": evaluation.critique})
+                
+                if evaluation.requires_revision:
+                    logger.info("Revision required based on evaluation. Triggering revision cycle.")
+                    await self.emit_event("REVISION_STARTED", {})
+                    
+                    revised_output = await self.llm_engine.revise_output(goal, state.final_output, evaluation.critique)
+                    state.final_output = revised_output
+                    
+                    logger.info("Revision completed.")
+                    await self.emit_event("REVISION_COMPLETED", {})
+                
             except Exception as e:
-                logger.error(f"Final synthesis failed: {e}")
-                research_context["status"] = "failed"
-                research_context["halt_reason"] = f"Synthesis error: {e}"
-                await self.emit_event("RESEARCH_HALTED", {"reason": research_context["halt_reason"]})
+                logger.error(f"Final synthesis or reflection failed: {e}")
+                state.status = "failed"
+                await self.emit_event("RESEARCH_HALTED", {"reason": f"Synthesis error: {e}"})
         else:
-            await self.emit_event("RESEARCH_HALTED", {"reason": research_context.get("halt_reason")})
+            await self.emit_event("RESEARCH_HALTED", {"reason": f"Ended with status {state.status}"})
             
-        return research_context
+        return state.model_dump()

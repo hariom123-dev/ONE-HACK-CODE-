@@ -1,141 +1,166 @@
 import { expect } from "chai";
 import { ethers, network } from "hardhat";
-import { Contract, Signer } from "ethers";
+import { time } from "@nomicfoundation/hardhat-network-helpers";
+import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
-describe("AgentBudgetEscrow - Institutional Protocol Firewall", function () {
-    let escrow: Contract;
-    let usdc: Contract;
-    let owner: Signer;
-    let agent: Signer;
-    let provider: Signer;
-    let rando: Signer;
+describe("AgentBudgetEscrow - Exhaustive Test Suite", function () {
+  let escrow: any;
+  let usdc: any;
+  let owner: SignerWithAddress;
+  let provider: SignerWithAddress;
+  let agent: SignerWithAddress;
 
-    const EPOCH_CAP = ethers.parseUnits("100", 6);
-    const MAX_PER_TX = ethers.parseUnits("50", 6);
-    const EPOCH_DURATION = 86400; // 1 day
+  const EPOCH_CAP = ethers.parseUnits("100", 6);
+  const MAX_PER_TX = ethers.parseUnits("10", 6);
+  const EPOCH_DURATION = 86400; // 1 day
 
-    beforeEach(async function () {
-        [owner, agent, provider, rando] = await ethers.getSigners();
+  beforeEach(async function () {
+    [owner, provider, agent] = await ethers.getSigners();
 
-        // Deploy Mock USDC
-        const MockUSDC = await ethers.getContractFactory("MockUSDC");
-        usdc = await MockUSDC.deploy();
-        await usdc.waitForDeployment();
+    const USDC = await ethers.getContractFactory("MockUSDC");
+    usdc = await USDC.deploy();
 
-        // Mint and approve for the Owner (Smart Account)
-        await usdc.connect(owner).mint(await owner.getAddress(), ethers.parseUnits("1000", 6));
+    const Escrow = await ethers.getContractFactory("AgentBudgetEscrow");
+    escrow = await Escrow.deploy(await usdc.getAddress());
 
-        // Deploy Escrow
-        const Escrow = await ethers.getContractFactory("AgentBudgetEscrow");
-        escrow = await Escrow.deploy(await usdc.getAddress());
-        await escrow.waitForDeployment();
+    await escrow.setAgentParameters(EPOCH_CAP, EPOCH_DURATION, MAX_PER_TX);
 
-        await usdc.connect(owner).approve(await escrow.getAddress(), ethers.parseUnits("1000", 6));
+    await usdc.mint(owner.address, ethers.parseUnits("10000", 6));
+    await usdc.connect(owner).approve(await escrow.getAddress(), ethers.MaxUint256);
+  });
 
-        // Set advanced velocity parameters for the Agent
-        await escrow.connect(owner).setAgentParameters(
-            await agent.getAddress(),
-            EPOCH_CAP,
-            EPOCH_DURATION,
-            MAX_PER_TX
-        );
+  describe("1. Rolling Epochs", function () {
+    it("Should revert with EpochBudgetExceeded if cap is exceeded", async function () {
+      const requestHash = ethers.encodeBytes32String("req1");
+      const amount = EPOCH_CAP + 1n; 
+
+      await expect(
+        escrow.connect(agent).payForService(owner.address, provider.address, amount, requestHash)
+      ).to.be.revertedWith("EpochBudgetExceeded");
     });
-
-    it("REVERTS: ExceedsMaxPerTx when a single service call exceeds maxPerTx", async function () {
-        const reqHash = ethers.keccak256(ethers.toUtf8Bytes("req1"));
-        await expect(
-            escrow.connect(agent).payForService(
-                await owner.getAddress(),
-                await provider.getAddress(),
-                ethers.parseUnits("51", 6), // Requesting 51, Limit is 50
-                reqHash
-            )
-        ).to.be.revertedWithCustomError(escrow, "ExceedsMaxPerTx");
-    });
-
-    it("ROLLING EPOCH RESET: Blocked agent can spend after epochDuration", async function () {
-        const req1 = ethers.keccak256(ethers.toUtf8Bytes("req1"));
-        const req2 = ethers.keccak256(ethers.toUtf8Bytes("req2"));
-        const req3 = ethers.keccak256(ethers.toUtf8Bytes("req3"));
-
-        // Max out epoch (50 + 50 = 100)
-        await escrow.connect(agent).payForService(await owner.getAddress(), await provider.getAddress(), ethers.parseUnits("50", 6), req1);
-        await escrow.connect(agent).payForService(await owner.getAddress(), await provider.getAddress(), ethers.parseUnits("50", 6), req2);
-
-        // Third should fail due to epoch limit
-        await expect(
-            escrow.connect(agent).payForService(await owner.getAddress(), await provider.getAddress(), ethers.parseUnits("10", 6), req3)
-        ).to.be.revertedWithCustomError(escrow, "EpochBudgetExceeded");
-
-        // Advance EVM time by 1 day + 1 second
-        await network.provider.send("evm_increaseTime", [86401]);
-        await network.provider.send("evm_mine");
-
-        // Third should now succeed because the rolling epoch reset
-        await expect(
-            escrow.connect(agent).payForService(await owner.getAddress(), await provider.getAddress(), ethers.parseUnits("10", 6), req3)
-        ).to.emit(escrow, "PaymentLocked");
-    });
-
-    it("CIRCUIT BREAKER: Frozen agent cannot lock funds", async function () {
-        // Owner triggers circuit breaker
-        await escrow.connect(owner).freezeAgent(await agent.getAddress(), true);
+    
+    it("Should reset exactly after epochDuration", async function () {
+        // Assume hitting max capacity
+        for(let i=0; i<10; i++) {
+            await escrow.connect(agent).payForService(owner.address, provider.address, MAX_PER_TX, ethers.encodeBytes32String(`req_${i}`));
+        }
         
-        const reqHash = ethers.keccak256(ethers.toUtf8Bytes("req1"));
         await expect(
-            escrow.connect(agent).payForService(
-                await owner.getAddress(),
-                await provider.getAddress(),
-                ethers.parseUnits("10", 6),
-                reqHash
-            )
-        ).to.be.revertedWithCustomError(escrow, "AgentFrozen");
-    });
-
-    it("EIP-712 VERIFICATION: Valid EIP-712 typed data unlocks funds", async function () {
-        const reqHash = ethers.keccak256(ethers.toUtf8Bytes("req1"));
-        const amount = ethers.parseUnits("10", 6);
+            escrow.connect(agent).payForService(owner.address, provider.address, 1n, ethers.encodeBytes32String("req_11"))
+        ).to.be.revertedWith("EpochBudgetExceeded");
         
-        await escrow.connect(agent).payForService(
-            await owner.getAddress(),
-            await provider.getAddress(),
-            amount,
-            reqHash
-        );
-
-        const deliveryHash = ethers.keccak256(ethers.toUtf8Bytes("payload"));
+        // Time travel
+        await time.increase(EPOCH_DURATION + 1);
         
-        // Construct EIP-712 Domain and Typed Data exactly as defined in the Contract
-        const domain = {
-            name: "AgentBudgetEscrow",
-            version: "1",
-            chainId: (await ethers.provider.getNetwork()).chainId,
-            verifyingContract: await escrow.getAddress()
-        };
-
-        const types = {
-            DeliveryProof: [
-                { name: "requestHash", type: "bytes32" },
-                { name: "deliveryHash", type: "bytes32" },
-                { name: "amount", type: "uint256" }
-            ]
-        };
-
-        const value = {
-            requestHash: reqHash,
-            deliveryHash: deliveryHash,
-            amount: amount
-        };
-
-        // Ethers automatically handles hashing the typed data struct and signing it
-        const signature = await provider.signTypedData(domain, types, value);
-
-        // Verify that the exact EIP-712 signature works
-        await expect(escrow.connect(provider).recordDelivery(reqHash, deliveryHash, signature))
-            .to.emit(escrow, "DeliveryRecorded")
-            .withArgs(reqHash, await provider.getAddress(), amount);
-
-        // Ensure funds transferred to provider
-        expect(await usdc.balanceOf(await provider.getAddress())).to.equal(amount);
+        // Should succeed now
+        await expect(
+            escrow.connect(agent).payForService(owner.address, provider.address, 1n, ethers.encodeBytes32String("req_12"))
+        ).to.not.be.reverted;
     });
+  });
+
+  describe("2. Per-Tx Ceilings", function () {
+    it("Should revert with ExceedsMaxPerTx even if epoch budget has room", async function () {
+      const requestHash = ethers.encodeBytes32String("req2");
+      const amount = MAX_PER_TX + 1n;
+      
+      await expect(
+        escrow.connect(agent).payForService(owner.address, provider.address, amount, requestHash)
+      ).to.be.revertedWith("ExceedsMaxPerTx");
+    });
+  });
+
+  describe("3. Emergency Circuit Breaker", function () {
+    it("Should block payForService but allow recordDelivery after freeze", async function () {
+      const requestHash = ethers.encodeBytes32String("req_freeze");
+      await escrow.connect(agent).payForService(owner.address, provider.address, MAX_PER_TX, requestHash);
+      
+      await escrow.connect(owner).freezeAgent();
+      
+      await expect(
+          escrow.connect(agent).payForService(owner.address, provider.address, MAX_PER_TX, ethers.encodeBytes32String("req_blocked"))
+      ).to.be.revertedWith("AgentIsFrozen");
+      
+      const deliveryHash = ethers.encodeBytes32String("delivery");
+      
+      const domain = {
+        name: "AgentBudgetEscrow",
+        version: "1",
+        chainId: (await ethers.provider.getNetwork()).chainId,
+        verifyingContract: await escrow.getAddress()
+      };
+      
+      const types = {
+          Delivery: [
+              { name: "requestHash", type: "bytes32" },
+              { name: "deliveryHash", type: "bytes32" }
+          ]
+      };
+      
+      const signature = await provider.signTypedData(domain, types, {
+          requestHash, deliveryHash
+      });
+      
+      await expect(
+          escrow.connect(provider).recordDelivery(requestHash, deliveryHash, signature)
+      ).to.not.be.reverted;
+    });
+  });
+
+  describe("4. EIP-712 Cryptography", function () {
+    it("Should transfer USDC on valid signature, revert on invalid/tampered", async function () {
+      const requestHash = ethers.encodeBytes32String("req_crypto");
+      const amount = MAX_PER_TX;
+      await escrow.connect(agent).payForService(owner.address, provider.address, amount, requestHash);
+      
+      const deliveryHash = ethers.encodeBytes32String("delivery_valid");
+      const domain = {
+        name: "AgentBudgetEscrow",
+        version: "1",
+        chainId: (await ethers.provider.getNetwork()).chainId,
+        verifyingContract: await escrow.getAddress()
+      };
+      const types = {
+          Delivery: [
+              { name: "requestHash", type: "bytes32" },
+              { name: "deliveryHash", type: "bytes32" }
+          ]
+      };
+      
+      const signature = await provider.signTypedData(domain, types, { requestHash, deliveryHash });
+      
+      const providerBalBefore = await usdc.balanceOf(provider.address);
+      await escrow.connect(owner).recordDelivery(requestHash, deliveryHash, signature);
+      const providerBalAfter = await usdc.balanceOf(provider.address);
+      
+      expect(providerBalAfter - providerBalBefore).to.equal(amount);
+      
+      // Tampered
+      const requestHash2 = ethers.encodeBytes32String("req_crypto2");
+      await escrow.connect(agent).payForService(owner.address, provider.address, amount, requestHash2);
+      
+      const tamperedDeliveryHash = ethers.encodeBytes32String("tampered");
+      await expect(
+          escrow.connect(owner).recordDelivery(requestHash2, tamperedDeliveryHash, signature)
+      ).to.be.revertedWith("InvalidSignature");
+    });
+  });
+
+  describe("5. Timelock Refunds", function () {
+    it("Should revert if called before expiresAt, return funds after", async function () {
+      const requestHash = ethers.encodeBytes32String("req_refund");
+      const amount = MAX_PER_TX;
+      await escrow.connect(agent).payForService(owner.address, provider.address, amount, requestHash);
+      
+      await expect(escrow.connect(owner).refund(requestHash)).to.be.revertedWith("TimelockActive");
+      
+      await time.increase(3601);
+      
+      const ownerBalBefore = await usdc.balanceOf(owner.address);
+      await escrow.connect(owner).refund(requestHash);
+      const ownerBalAfter = await usdc.balanceOf(owner.address);
+      
+      expect(ownerBalAfter - ownerBalBefore).to.equal(amount);
+    });
+  });
 });

@@ -31,7 +31,7 @@ class AgentWallet:
             self.session_key_manager.session_account.address
         ).call()
 
-    async def claim_refund(self, request_hash: str) -> str:
+    async def execute_refund(self, request_hash: str) -> str:
         """Autonomously reclaims stalled escrows via ERC-4337 UserOperation."""
         if not request_hash.startswith('0x'):
             request_hash = '0x' + request_hash
