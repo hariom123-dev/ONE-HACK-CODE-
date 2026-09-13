@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Dark palette identical to Larp */
+  --color-background:  #09090B;
+  --color-surface:     #18181B;
+  --color-surface-variant: #27272A;
+  --color-surface-bright: #3F3F46;
+  --color-outline:     #3F3F46;
+  --color-outline-variant: #27272A;
+  --color-on-surface:  #F4F4F5;
+  --color-on-surface-variant: #A1A1AA;
+  --color-muted:       #D4D4D8;
+
+  /* Accent — emerald green (same as Larp) */
+  --color-primary:     #10B981;
+  --color-primary-dim: #059669;
+  --color-on-primary:  #09090B;
+
+  /* Error/block state */
+  --color-error:       #EF4444;
+  --color-error-dim:   #7F1D1D;
+  --color-warning:     #F59E0B;
+
+  /* Typography scale */
+  --text-display: 36px;
+  --text-headline-lg: 24px;
+  --text-headline-md: 18px;
+  --text-body-lg: 15px;
+  --text-body-md: 13px;
+  --text-label: 11px;
+}
+
+@layer utilities {
+  @keyframes fade-in-down {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-in-down { animation: fade-in-down 0.2s ease-out both; }
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  .animate-fade-in { animation: fade-in 0.3s ease-out both; }
+
+  @keyframes slide-up {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-slide-up { animation: slide-up 0.25s ease-out both; }
+
+  @keyframes pulse-border {
+    0%, 100% { border-color: #EF4444; }
+    50%       { border-color: #7F1D1D; }
+  }
+  .animate-pulse-border { animation: pulse-border 1.2s ease-in-out infinite; }
+
+  @keyframes shimmer {
+    from { background-position: -200% 0; }
+    to   { background-position:  200% 0; }
+  }
+  .animate-shimmer {
+    background: linear-gradient(90deg, #27272A 25%, #3F3F46 50%, #27272A 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-background);
+  color: var(--color-on-surface);
+}
+
+/* Material Icons */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-outlined.fill-1 {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3F3F46; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #52525B; }
